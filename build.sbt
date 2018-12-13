@@ -13,11 +13,6 @@
  * the License.
  */
 
-import ReleaseTransformations._
-import sbtrelease.Vcs
-
-import scala.sys.process.Process
-
 scalaVersion in ThisBuild := "2.12.7"
 crossScalaVersions in ThisBuild := Seq("2.11.12", "2.12.7")
 
@@ -78,28 +73,22 @@ lazy val tensorFlowSettings = Seq(
 lazy val all = (project in file("."))
     .aggregate(bert)
     .dependsOn(bert)
-    .settings(moduleName := "bert", name := "BERT")
+    .settings(moduleName := "root", name := "BERT Root")
     .settings(commonSettings)
-    .settings(publishSettings)
     .settings(
-      assemblyJarName in assembly := s"bert-${version.value}.jar",
-      // mainClass in assembly := Some("org.platanios.bert.experiments.Experiment"),
-      test in assembly := {},
       sourcesInBase := false,
       unmanagedSourceDirectories in Compile := Nil,
       unmanagedSourceDirectories in Test := Nil,
       unmanagedResourceDirectories in Compile := Nil,
-      unmanagedResourceDirectories in Test := Nil,
-      publishArtifact := true)
+      unmanagedResourceDirectories in Test := Nil)
 
 lazy val bert = (project in file("./bert"))
     .settings(moduleName := "bert", name := "BERT")
     .settings(commonSettings)
     .settings(testSettings)
     .settings(tensorFlowSettings)
-    .settings(publishSettings)
     .settings(
       libraryDependencies ++= Seq(
-        "com.github.pathikrit" %% "better-files" % "3.4.0",
+        "com.github.pathikrit" %% "better-files" % "3.7.0",
         "org.apache.commons" % "commons-compress" % "1.16.1",
         "com.twitter" %% "util-collection" % "18.11.0"))
