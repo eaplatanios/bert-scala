@@ -25,6 +25,7 @@ organization in ThisBuild := "org.platanios"
 // every 24 hours.
 resolvers in ThisBuild += Resolver.sonatypeRepo("snapshots")
 
+val circeVersion = "0.10.0"
 val tensorFlowScalaVersion = "0.4.2-SNAPSHOT"
 
 autoCompilerPlugins in ThisBuild := true
@@ -91,4 +92,9 @@ lazy val bert = (project in file("./bert"))
       libraryDependencies ++= Seq(
         "com.github.pathikrit" %% "better-files" % "3.7.0",
         "org.apache.commons" % "commons-compress" % "1.16.1",
-        "com.twitter" %% "util-collection" % "18.11.0"))
+        "com.twitter" %% "util-collection" % "18.11.0",
+        "io.circe" %% "circe-core" % circeVersion,
+        "io.circe" %% "circe-generic" % circeVersion,
+        "io.circe" %% "circe-generic-extras" % circeVersion,
+        "io.circe" %% "circe-parser" % circeVersion),
+      addCompilerPlugin("org.scalamacros" % "paradise" % "2.1.1" cross CrossVersion.full))
