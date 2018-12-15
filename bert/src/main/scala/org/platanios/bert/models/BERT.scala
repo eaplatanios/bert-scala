@@ -16,6 +16,7 @@
 package org.platanios.bert.models
 
 import org.platanios.tensorflow.api._
+import org.platanios.tensorflow.api.learn.Mode
 import org.platanios.tensorflow.api.io.CheckpointReader
 
 import better.files._
@@ -25,10 +26,104 @@ import _root_.io.circe.generic.extras._
 import _root_.io.circe.parser._
 import _root_.io.circe.syntax._
 
-/**
+/** BERT model ("Bidirectional Embedding Representations from a Transformer").
+  *
+  * @param  config              Model configuration.
+  * @param  useOneHotEmbeddings Boolean value indicating whether to add embeddings for the position of each token
+  *                             in the input sequence.
+  * @param  name                Name for this BERT model.
+  *
   * @author Emmanouil Antonios Platanios
   */
+class BERT[T: TF : IsHalfOrFloatOrDouble](
+    val config: BERT.Config,
+    val useOneHotEmbeddings: Boolean = false,
+    override val name: String = "BERT"
+) extends tf.learn.Layer[BERT.In, BERT.Out[T]](name) {
+  override val layerType: String = "BERT"
+
+  override def forwardWithoutContext(input: BERT.In)(implicit mode: Mode): BERT.Out[T] = {
+    tf.variableScope("BERT") {
+      val (embeddingsOutput, embeddingsTable) = tf.variableScope("Embeddings") {
+        // Perform embedding lookup on the word IDs.
+        val (embeddingsOutput, embeddingsTable) = Helpers.embeddingLookup(
+          input.inputIDs,
+          config.vocabularySize,
+          config.hiddenSize,
+          config.initializerRange,
+          "WordEmbeddings",
+          useOneHotEmbeddings)
+
+        // Add positional embeddings and token type embeddings, and then layer normalize and perform dropout.
+        val postProcessedEmbeddingsOutput = Helpers.embeddingPostProcessor(
+          embeddingsOutput,
+          tokenTypeIDs = Some(input.tokenTypeIDs),
+          tokenTypeVocabularySize = config.typeVocabularySize,
+          tokenTypeEmbeddingsTableName = "TokenTypeEmbeddings",
+          usePositionEmbeddings = true,
+          positionEmbeddingsTableName = "PositionEmbeddings",
+          initializerRange = config.initializerRange,
+          maxPositionEmbeddings = config.maxPositionEmbeddings,
+          dropoutProbability = config.hiddenDropoutProbability)
+        (postProcessedEmbeddingsOutput, embeddingsTable)
+      }
+
+      val encoderLayers = tf.variableScope("Encoder") {
+        // This converts a 2D mask of shape [batchSize, sequenceLength] to a 3D mask of shape
+        // [batchSize, sequenceLength, sequenceLength] which is used for the attention scores.
+        val attentionMask = Helpers.createAttentionMaskFromInputMask(input.inputIDs, input.inputMask)
+
+        // Create the stacked transformer.
+        // `sequenceOutput` shape = [batchSize, sequenceLength, hiddenSize].
+        Helpers.transformer(
+          input = embeddingsOutput,
+          attentionMask = Some(attentionMask),
+          hiddenSize = config.hiddenSize,
+          numHiddenLayers = config.numHiddenLayers,
+          numAttentionHeads = config.numAttentionHeads,
+          intermediateSize = config.intermediateSize,
+          intermediateActivation = config.activation,
+          hiddenDropoutProbability = config.hiddenDropoutProbability,
+          attentionDropoutProbability = config.attentionDropoutProbability,
+          initializerRange = config.initializerRange)
+      }
+
+      val sequenceOutput = encoderLayers.last
+
+      // The "pooler" converts the encoded sequence tensor of shape [batchSize, sequenceLength, hiddenSize] to a tensor
+      // of shape [batchSize, hiddenSize]. This is necessary for segment-level (or segment-pair-level) classification
+      // tasks where we need a fixed dimensional representation of the segment.
+      val pooledOutput = tf.variableScope("Pooler") {
+        // We "pool" the model by simply taking the hidden state corresponding to the first token. We assume that this
+        // has been pre-trained.
+        val firstTokenTensor = sequenceOutput(::, 0, ::)
+        val weights = tf.variable[T](
+          name = "Weights",
+          shape = Shape(firstTokenTensor.shape(-1), config.hiddenSize),
+          initializer = BERT.createInitializer(config.initializerRange))
+        val bias = tf.variable[T](
+          name = "Bias",
+          shape = Shape(config.hiddenSize),
+          initializer = tf.ZerosInitializer)
+        Tanh(tf.linear(firstTokenTensor, weights, bias))
+      }
+
+      BERT.Out(sequenceOutput, pooledOutput, embeddingsOutput, encoderLayers, embeddingsTable)
+    }
+  }
+}
+
 object BERT {
+  case class In(inputIDs: Output[Int], inputMask: Output[Int], tokenTypeIDs: Output[Int])
+
+  case class Out[T: TF : IsHalfOrFloatOrDouble](
+      sequenceOutput: Output[T],
+      pooledOutput: Output[T],
+      embeddingsOutput: Output[T],
+      encoderLayers: Seq[Output[T]],
+      embeddingsTable: Variable[T])
+
+  /** JSON configuration used for serializing configurations. */
   private implicit val jsonConfig: Configuration = Configuration.default
 
   /** Configuration for the BERT model.

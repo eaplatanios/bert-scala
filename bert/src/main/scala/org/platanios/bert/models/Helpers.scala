@@ -168,14 +168,14 @@ object Helpers {
     */
   def embeddingPostProcessor[T: TF : IsHalfOrFloatOrDouble](
       input: Output[T],
-      tokenTypeIDs: Option[Output[Int]] = None,
-      tokenTypeVocabularySize: Int = 16,
-      tokenTypeEmbeddingsTableName: String = "TokenTypeEmbeddings",
-      usePositionEmbeddings: Boolean = true,
-      positionEmbeddingsTableName: String = "PositionEmbeddings",
-      initializerRange: Float = 0.02f,
-      maxPositionEmbeddings: Int = 512,
-      dropoutProbability: Float = 0.1f
+      tokenTypeIDs: Option[Output[Int]],
+      tokenTypeVocabularySize: Int,
+      tokenTypeEmbeddingsTableName: String,
+      usePositionEmbeddings: Boolean,
+      positionEmbeddingsTableName: String,
+      initializerRange: Float,
+      maxPositionEmbeddings: Int,
+      dropoutProbability: Float
   ): Output[T] = {
     val inputShape = tf.shape(input)
     val batchSize = if (input.shape(0) > -1) tf.constant(input.shape(0)) else inputShape(0)
@@ -304,7 +304,7 @@ object Helpers {
   def multiHeadAttention[T: TF : IsHalfOrFloatOrDouble](
       fromTensor: Output[T],
       toTensor: Output[T],
-      attentionMask: Option[Output[Int]] = None,
+      attentionMask: Option[Output[Float]] = None,
       numHeads: Int = 1,
       sizePerHead: Int = 512,
       queryActivation: Activation = Linear,
@@ -445,7 +445,7 @@ object Helpers {
     * for details.
     *
     * @param  input                       Tensor with shape `[batchSize, sequenceLength, inputWidth]`.
-    * @param  attentionMask               Tensor with shape [batchSize, fromSequenceLength, toSequenceLength]`. The
+    * @param  attentionMask               Tensor with shape `[batchSize, fromSequenceLength, toSequenceLength]`. The
     *                                     values should be `1` or `0`. The attention scores will effectively be set to
     *                                     negative infinity for any positions in the mask that are `0`, and will be
     *                                     unchanged for positions that are `1`.
@@ -464,15 +464,15 @@ object Helpers {
   @throws[IllegalArgumentException]
   def transformer[T: TF : IsHalfOrFloatOrDouble](
       input: Output[T],
-      attentionMask: Option[Output[Int]] = None,
-      hiddenSize: Int = 768,
-      numHiddenLayers: Int = 12,
-      numAttentionHeads: Int = 12,
-      intermediateSize: Int = 3072,
-      intermediateActivation: Activation = GELU,
-      hiddenDropoutProbability: Float = 0.1f,
-      attentionDropoutProbability: Float = 0.1f,
-      initializerRange: Float = 0.02f
+      attentionMask: Option[Output[Float]],
+      hiddenSize: Int,
+      numHiddenLayers: Int,
+      numAttentionHeads: Int,
+      intermediateSize: Int,
+      intermediateActivation: Activation,
+      hiddenDropoutProbability: Float,
+      attentionDropoutProbability: Float,
+      initializerRange: Float
   ): Seq[Output[T]] = {
     if (hiddenSize % numAttentionHeads != 0) {
       throw new IllegalArgumentException(
