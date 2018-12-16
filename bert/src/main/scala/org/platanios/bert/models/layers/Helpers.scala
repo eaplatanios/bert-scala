@@ -88,12 +88,17 @@ object Helpers {
       val gamma = context.layer.getParameter[T]("Gamma", paramsShape, tf.OnesInitializer)
 
       // Calculate the moments on the last axis (layer activations).
-      val mean = tf.mean(value, axes = Seq(-1), keepDims = true, name = "Mean")
-      val variance = tf.mean(
-        tf.squaredDifference(value, tf.stopGradient(mean)), axes = Seq(-1), keepDims = true, name = "Variance")
+      val mean = tf.mean(value, axes = -1, keepDims = true)
+      val variance = tf.mean(tf.square(value - mean), axes = -1, keepDims = true)
+      // val mean = tf.mean(value, axes = Seq(-1), keepDims = true, name = "Mean")
+      // val variance = tf.mean(
+      //   tf.squaredDifference(value, tf.stopGradient(mean)), axes = Seq(-1), keepDims = true, name = "Variance")
 
       // Compute layer normalization using the batch normalization function.
-      val result = batchNormalization(value, mean, variance, Some(beta), Some(gamma), tf.constant(1e-12).castTo[T])
+      val epsilon = tf.constant(1e-12f)
+      val normalizedInput = (value - mean) * tf.rsqrt(variance + epsilon.castTo[T])
+      val result = normalizedInput * gamma + beta
+      // val result = batchNormalization(value, mean, variance, Some(beta), Some(gamma), tf.constant(1e-12).castTo[T])
       result.setShape(value.shape)
       result
     }
