@@ -94,7 +94,7 @@ class QuestionAnsweringBERT[T: TF : IsHalfOrFloatOrDouble](
 
       config.traceSteps.foreach(numSteps =>
         hooks += tf.learn.TimelineHook(
-          summaryDir, showDataFlow = true, showMemory = true, trigger = StepHookTrigger(numSteps)))
+          config.summaryDir, showDataFlow = true, showMemory = true, trigger = StepHookTrigger(numSteps)))
 
       var sessionConfig = SessionConfig(
         allowSoftPlacement = Some(config.allowSoftPlacement),
