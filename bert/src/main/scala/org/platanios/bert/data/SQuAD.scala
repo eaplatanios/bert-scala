@@ -277,7 +277,7 @@ object SQuAD {
               logger.info(s"\t Unique ID:            $uniqueID")
               logger.info(s"\t Example ID:           $exampleIndex")
               logger.info(s"\t Document Span ID:     $documentSpanIndex")
-              logger.info(s"\t Tokens:               [${tokens.map(t => s"'$t'").mkString(", ")}]")
+              logger.info(s"\t Tokens:               ${tokens.mkString(" ")}")
               logger.info(s"\t Token-To-Original:    {$tokToOriginal}")
               logger.info(s"\t Token-Is-Max-Context: {$tokMaxContext}")
               logger.info(s"\t Input IDs:            [${inputIDs.mkString(", ")}]")
@@ -460,17 +460,19 @@ object SQuAD {
       batchSize: Int,
       numParallelCalls: Int
   ): tf.data.Dataset[(QuestionAnsweringBERT.In, QuestionAnsweringBERT.TrainIn)] = {
-    tf.data.datasetFromTFRecordFiles(file.path.toAbsolutePath.toString)
-        .repeat()
-        .shuffle(100)
-        .mapAndBatch(
-          function = record => {
-            val parsed = parseTrainTFRecord(record)
-            (parsed._1, (parsed._2._1, parsed._2._2))
-          },
-          batchSize = batchSize,
-          numParallelCalls = numParallelCalls,
-          dropRemainder = false)
+    tf.device("/CPU:0") {
+      tf.data.datasetFromTFRecordFiles(file.path.toAbsolutePath.toString)
+          .repeat()
+          .shuffle(100)
+          .mapAndBatch(
+            function = record => {
+              val parsed = parseTrainTFRecord(record)
+              (parsed._1, (parsed._2._1, parsed._2._2))
+            },
+            batchSize = batchSize,
+            numParallelCalls = numParallelCalls,
+            dropRemainder = false)
+    }
   }
 
   protected def parseTrainTFRecord(
@@ -574,7 +576,7 @@ object SQuAD {
         devTFRecordsFile)
     }
 
-    val trainDataset = () => createTrainDataset(trainTFRecordsFile, batchSize = 32, numParallelCalls = 4)
+    val trainDataset = () => createTrainDataset(trainTFRecordsFile, batchSize = 12, numParallelCalls = 4)
     val config = QuestionAnsweringBERT.Config(
       bertConfig = BERT.Config.fromFile(bertConfigFile),
       bertCheckpoint = Some(bertCkptFile.path),

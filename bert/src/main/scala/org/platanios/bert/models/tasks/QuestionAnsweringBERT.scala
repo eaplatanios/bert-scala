@@ -57,61 +57,65 @@ class QuestionAnsweringBERT[T: TF : IsHalfOrFloatOrDouble](
   }
 
   protected val estimator: QuestionAnsweringBERT.Estimator[T] = {
-    val optimizer = tf.train.AMSGrad(config.learningRate)
-    val model = config.maxGradNorm match {
-      case Some(norm) =>
-        tf.learn.Model.simpleSupervised(
-          input = input,
-          trainInput = trainInput,
-          layer = layer,
-          loss = loss,
-          optimizer = optimizer,
-          clipGradients = tf.learn.ClipGradientsByGlobalNorm(norm),
-          colocateGradientsWithOps = config.colocateGradientsWithOps)
-      case None =>
-        tf.learn.Model.simpleSupervised(
-          input = input,
-          trainInput = trainInput,
-          layer = layer,
-          loss = loss,
-          optimizer = optimizer,
-          colocateGradientsWithOps = config.colocateGradientsWithOps)
+    tf.device("/GPU:0") {
+      val optimizer = tf.train.AMSGrad(config.learningRate)
+      val model = config.maxGradNorm match {
+        case Some(norm) =>
+          tf.learn.Model.simpleSupervised(
+            input = input,
+            trainInput = trainInput,
+            layer = layer,
+            loss = loss,
+            optimizer = optimizer,
+            clipGradients = tf.learn.ClipGradientsByGlobalNorm(norm),
+            colocateGradientsWithOps = config.colocateGradientsWithOps)
+        case None =>
+          tf.learn.Model.simpleSupervised(
+            input = input,
+            trainInput = trainInput,
+            layer = layer,
+            loss = loss,
+            optimizer = optimizer,
+            colocateGradientsWithOps = config.colocateGradientsWithOps)
+      }
+
+      // Create estimator hooks.
+      var hooks = Set[tf.learn.Hook]()
+
+      // Add logging hooks.
+      if (config.logLossFrequency > 0)
+        hooks += tf.learn.LossLogger(log = true, trigger = StepHookTrigger(config.logLossFrequency))
+
+      // Add summaries/checkpoints hooks.
+      hooks ++= Set(
+        tf.learn.StepRateLogger(log = false, summaryDir = config.summaryDir, trigger = StepHookTrigger(100)),
+        tf.learn.SummarySaver(config.summaryDir, StepHookTrigger(config.summarySteps)),
+        tf.learn.CheckpointSaver(config.workingDir, StepHookTrigger(config.checkpointSteps)))
+
+      var sessionConfig = SessionConfig(
+        allowSoftPlacement = Some(config.allowSoftPlacement),
+        logDevicePlacement = Some(config.logDevicePlacement),
+        gpuAllowMemoryGrowth = Some(config.gpuAllowMemoryGrowth))
+      if (config.useXLA)
+        sessionConfig = sessionConfig.copy(optGlobalJITLevel = Some(SessionConfig.L1GraphOptimizerGlobalJIT))
+
+      // Create estimator.
+      tf.learn.InMemoryEstimator(
+        model, tf.learn.Configuration(
+          workingDir = Some(config.workingDir),
+          sessionConfig = Some(sessionConfig),
+          randomSeed = config.randomSeed),
+        trainHooks = hooks)
     }
-
-    // Create estimator hooks.
-    var hooks = Set[tf.learn.Hook]()
-
-    // Add logging hooks.
-    if (config.logLossFrequency > 0)
-      hooks += tf.learn.LossLogger(log = true, trigger = StepHookTrigger(config.logLossFrequency))
-
-    // Add summaries/checkpoints hooks.
-    hooks ++= Set(
-      tf.learn.StepRateLogger(log = false, summaryDir = config.summaryDir, trigger = StepHookTrigger(100)),
-      tf.learn.SummarySaver(config.summaryDir, StepHookTrigger(config.summarySteps)),
-      tf.learn.CheckpointSaver(config.workingDir, StepHookTrigger(config.checkpointSteps)))
-
-    var sessionConfig = SessionConfig(
-      allowSoftPlacement = Some(config.allowSoftPlacement),
-      logDevicePlacement = Some(config.logDevicePlacement),
-      gpuAllowMemoryGrowth = Some(config.gpuAllowMemoryGrowth))
-    if (config.useXLA)
-      sessionConfig = sessionConfig.copy(optGlobalJITLevel = Some(SessionConfig.L1GraphOptimizerGlobalJIT))
-
-    // Create estimator.
-    tf.learn.InMemoryEstimator(
-      model, tf.learn.Configuration(
-        workingDir = Some(config.workingDir),
-        sessionConfig = Some(sessionConfig),
-        randomSeed = config.randomSeed),
-      trainHooks = hooks)
   }
 
   def train(
       dataset: () => tf.data.Dataset[(QuestionAnsweringBERT.In, QuestionAnsweringBERT.TrainIn)],
       stopCriteria: tf.learn.StopCriteria = tf.learn.StopCriteria()
   ): Unit = {
-    estimator.train(dataset, stopCriteria)
+    tf.device("/GPU:0") {
+      estimator.train(dataset, stopCriteria)
+    }
   }
 
   def predict(dataset: () => tf.data.Dataset[QuestionAnsweringBERT.In]): Iterator[Unit] = {
@@ -134,30 +138,32 @@ class QuestionAnsweringBERT[T: TF : IsHalfOrFloatOrDouble](
       override def forwardWithoutContext(
           input: QuestionAnsweringBERT.In
       )(implicit mode: Mode): QuestionAnsweringBERT.Out[T] = {
-        tf.learn.withParameterGetter(parameterGetter(this)) {
-          val (uniqueIDs, inputIDs, inputMask, segmentIDs) = input
+        tf.device("/GPU:0") {
+          tf.learn.withParameterGetter(parameterGetter(this)) {
+            val (uniqueIDs, inputIDs, inputMask, segmentIDs) = input
 
-          // Encode the input sequences using BERT.
-          val bertOutput = bertLayer.forwardWithoutContext(BERT.In(inputIDs, inputMask, segmentIDs))
-          val sequenceOutput = bertOutput.encoderLayers.last
+            // Encode the input sequences using BERT.
+            val bertOutput = bertLayer.forwardWithoutContext(BERT.In(inputIDs, inputMask, segmentIDs))
+            val sequenceOutput = bertOutput.encoderLayers.last
 
-          // Use a linear layer for the span prediction.
-          val logits = tf.variableScope("Classification") {
-            val weights = getParameter[T](
-              name = "Weights",
-              shape = Shape(sequenceOutput.shape(-1), 2),
-              initializer = BERT.createInitializer(config.bertConfig.initializerRange))
-            val bias = getParameter[T](
-              name = "Bias",
-              shape = Shape(2),
-              initializer = tf.ZerosInitializer)
-            tf.linear(sequenceOutput, weights, bias)
+            // Use a linear layer for the span prediction.
+            val logits = tf.variableScope("Classification") {
+              val weights = getParameter[T](
+                name = "Weights",
+                shape = Shape(sequenceOutput.shape(-1), 2),
+                initializer = BERT.createInitializer(config.bertConfig.initializerRange))
+              val bias = getParameter[T](
+                name = "Bias",
+                shape = Shape(2),
+                initializer = tf.ZerosInitializer)
+              tf.linear(sequenceOutput, weights, bias)
+            }
+
+            val unstackedLogits = tf.unstack(tf.transpose(logits, Tensor(2, 0, 1)))
+            val startLogits = unstackedLogits.head
+            val endLogits = unstackedLogits.last
+            (uniqueIDs, startLogits, endLogits)
           }
-
-          val unstackedLogits = tf.unstack(tf.transpose(logits, Tensor(2, 0, 1)))
-          val startLogits = unstackedLogits.head
-          val endLogits = unstackedLogits.last
-          (uniqueIDs, startLogits, endLogits)
         }
       }
     }
@@ -170,18 +176,20 @@ class QuestionAnsweringBERT[T: TF : IsHalfOrFloatOrDouble](
       override def forwardWithoutContext(
           input: (QuestionAnsweringBERT.Out[T], QuestionAnsweringBERT.TrainIn)
       )(implicit mode: Mode): Output[Float] = {
-        val sequenceLength = tf.shape(input._1._2).slice(1)
+        tf.device("/GPU:0") {
+          val sequenceLength = tf.shape(input._1._2).slice(1)
 
-        def computeLoss(logits: Output[Float], positions: Output[Int]): Output[Float] = {
-          val oneHotPositions = tf.oneHot[Float, Int](positions, depth = sequenceLength)
-          val logProbabilities = tf.logSoftmax(logits, axis = -1)
-          -tf.mean(tf.sum(oneHotPositions * logProbabilities, axes = Tensor(-1)))
+          def computeLoss(logits: Output[Float], positions: Output[Int]): Output[Float] = {
+            val oneHotPositions = tf.oneHot[Float, Int](positions, depth = sequenceLength)
+            val logProbabilities = tf.logSoftmax(logits, axis = -1)
+            -tf.mean(tf.sum(oneHotPositions * logProbabilities, axes = Tensor(-1)))
+          }
+
+          val startLoss = computeLoss(input._1._2.toFloat, input._2._1)
+          val endLoss = computeLoss(input._1._3.toFloat, input._2._2)
+
+          (startLoss + endLoss) / tf.constant(2.0f)
         }
-
-        val startLoss = computeLoss(input._1._2.toFloat, input._2._1)
-        val endLoss = computeLoss(input._1._3.toFloat, input._2._2)
-
-        (startLoss + endLoss) / tf.constant(2.0f)
       }
     }
   }
@@ -270,9 +278,9 @@ object QuestionAnsweringBERT {
       workingDir: Path,
       summaryDir: Path,
       useOneHotEmbeddings: Boolean = false,
-      trainBatchSize: Int = 32,
+      trainBatchSize: Int = 12,
       inferBatchSize: Int = 8,
-      learningRate: Float = 5e-5f,
+      learningRate: Float = 3e-5f,
       maxGradNorm: Option[Float] = Some(1.0f),
       colocateGradientsWithOps: Boolean = true,
       checkpointSteps: Int = 1000,
