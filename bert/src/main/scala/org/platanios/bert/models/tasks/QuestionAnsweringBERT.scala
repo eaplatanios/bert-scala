@@ -92,6 +92,10 @@ class QuestionAnsweringBERT[T: TF : IsHalfOrFloatOrDouble](
         tf.learn.SummarySaver(config.summaryDir, StepHookTrigger(config.summarySteps)),
         tf.learn.CheckpointSaver(config.workingDir, StepHookTrigger(config.checkpointSteps)))
 
+      config.traceSteps.foreach(numSteps =>
+        hooks += tf.learn.TimelineHook(
+          summaryDir, showDataFlow = true, showMemory = true, trigger = StepHookTrigger(numSteps)))
+
       var sessionConfig = SessionConfig(
         allowSoftPlacement = Some(config.allowSoftPlacement),
         logDevicePlacement = Some(config.logDevicePlacement),
@@ -285,6 +289,7 @@ object QuestionAnsweringBERT {
       colocateGradientsWithOps: Boolean = true,
       checkpointSteps: Int = 1000,
       summarySteps: Int = 100,
+      traceSteps: Option[Int] = None,
       logLossFrequency: Int = 100,
       allowSoftPlacement: Boolean = true,
       logDevicePlacement: Boolean = false,

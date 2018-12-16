@@ -581,7 +581,8 @@ object SQuAD {
       bertConfig = BERT.Config.fromFile(bertConfigFile),
       bertCheckpoint = Some(bertCkptFile.path),
       workingDir = ("temp" / "working-dirs" / "uncased_L-12_H-768_A-12").path,
-      summaryDir = ("temp" / "summaries" / "uncased_L-12_H-768_A-12").path)
+      summaryDir = ("temp" / "summaries" / "uncased_L-12_H-768_A-12").path,
+      traceSteps = Some(100))
     val model = new QuestionAnsweringBERT[Float](config)
     model.train(trainDataset)
     println("haha")
