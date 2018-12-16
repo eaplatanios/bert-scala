@@ -13,10 +13,10 @@
  * the License.
  */
 
-package org.platanios.bert.models
+package org.platanios.bert.models.layers
 
+import org.platanios.bert.models._
 import org.platanios.tensorflow.api._
-import org.platanios.tensorflow.api.core.types.{IsHalfOrFloatOrDouble, TF}
 
 import scala.language.postfixOps
 
@@ -52,7 +52,7 @@ object Helpers {
     * @return Reshaped tensor.
     */
   def reshapeFromMatrix[T: TF](input: Output[T], originalShape: Output[Int]): Output[T] = {
-    tf.reshape(input, tf.concatenate(Seq(originalShape(0 :: -1), tf.constant(input.shape(-1)))))
+    tf.reshape(input, tf.concatenate(Seq(originalShape(0 :: -1), tf.constant(input.shape(-1))(NewAxis))))
   }
 
   //endregion Basic Manipulation
@@ -76,22 +76,68 @@ object Helpers {
     * @param  name  Name scope for the created ops.
     * @return `value` after normalization has been applied.
     */
-  def layerNormalization[T: TF : IsDecimal](value: Output[T], name: String = "LayerNorm"): Output[T] = {
+  def layerNormalization[T: TF : IsDecimal](
+      value: Output[T],
+      name: String = "LayerNorm"
+  )(implicit context: Context): Output[T] = {
     tf.variableScope(name) {
       val paramsShape = value.shape(-1 ::)
 
       // Allocate parameters for the beta and gamma of the normalization.
-      val beta = tf.variable[T]("Beta", paramsShape, tf.ZerosInitializer)
-      val gamma = tf.variable[T]("Gamma", paramsShape, tf.OnesInitializer)
+      val beta = context.layer.getParameter[T]("Beta", paramsShape, tf.ZerosInitializer)
+      val gamma = context.layer.getParameter[T]("Gamma", paramsShape, tf.OnesInitializer)
 
       // Calculate the moments on the last axis (layer activations).
-      val (mean, variance) = tf.moments(value, axes = Seq(-1), keepDims = true)
+      val mean = tf.mean(value, axes = Seq(-1), keepDims = true, name = "Mean")
+      val variance = tf.mean(
+        tf.squaredDifference(value, tf.stopGradient(mean)), axes = Seq(-1), keepDims = true, name = "Variance")
 
       // Compute layer normalization using the batch normalization function.
-      val result = tf.batchNormalization(
-        value, mean, variance, Some(beta.value), Some(gamma.value), tf.constant(1e-12).castTo[T])
+      val result = batchNormalization(value, mean, variance, Some(beta), Some(gamma), tf.constant(1e-12).castTo[T])
       result.setShape(value.shape)
       result
+    }
+  }
+
+  /** The `batchNormalization` op applies batch normalization to input `x`, as described in
+    * [[http://arxiv.org/abs/1502.03167]].
+    *
+    * The op normalizes a tensor by `mean` and `variance`, and optionally applies a `scale` and `offset` to it
+    * `beta + scale * (x - mean) / variance`. `mean`, `variance`, `offset` and `scale` are all expected to be of one
+    * of two shapes:
+    *
+    *   - In all generality, they can have the same number of dimensions as the input `x`, with identical sizes as `x`
+    *     for the dimensions that are not normalized over the "depth" dimension(s), and size 1 for the others, which
+    *     are being normalized over. `mean` and `variance` in this case would typically be the outputs of
+    *     `tf.moments(..., keepDims = true)` during training, or running averages thereof during inference.
+    *   - In the common case where the "depth" dimension is the last dimension in the input tensor `x`, they may be
+    *     one-dimensional tensors of the same size as the "depth" dimension. This is the case, for example, for the
+    *     common `[batch, depth]` layout of fully-connected layers, and `[batch, height, width, depth]` for
+    *     convolutions. `mean` and `variance` in this case would typically be the outputs of
+    *     `tf.moments(..., keepDims = false)` during training, or running averages thereof during inference.
+    *
+    * @param  x        Input tensor of arbitrary dimensionality.
+    * @param  mean     Mean tensor.
+    * @param  variance Variance tensor.
+    * @param  offset   Optional offset tensor, often denoted `beta` in equations.
+    * @param  scale    Optional scale tensor, often denoted `gamma` in equations.
+    * @param  epsilon  Small floating point number added to the variance to avoid division by zero.
+    * @param  name     Name for the created ops.
+    * @return Batch-normalized tensor `x`.
+    */
+  def batchNormalization[T: TF : IsDecimal](
+      x: Output[T],
+      mean: Output[T],
+      variance: Output[T],
+      offset: Option[Output[T]] = None,
+      scale: Option[Output[T]] = None,
+      epsilon: Output[T],
+      name: String = "BatchNormalization"
+  ): Output[T] = {
+    tf.nameScope(name) {
+      val inv = tf.rsqrt(variance + epsilon)
+      val scaledInv = scale.map(inv * _).getOrElse(inv)
+      x * scaledInv + offset.map(_ - mean * scaledInv).getOrElse(-mean * scaledInv)
     }
   }
 
@@ -115,7 +161,7 @@ object Helpers {
       initializerRange: Float = 0.02f,
       wordEmbeddingsTableName: String = "WordEmbeddings",
       useOneHotEmbeddings: Boolean = false
-  ): (Output[T], Variable[T]) = {
+  )(implicit context: Context): (Output[T], Output[T]) = {
     // This function assumes that the input is of shape [batchSize, sequenceLength, numInputs].
     // If the input is a two-dimensional tensor of shape [batchSize, sequenceLength],
     // we reshape it to [batchSize, sequenceLength, 1].
@@ -127,7 +173,7 @@ object Helpers {
       }
     }
 
-    val embeddingTable = tf.variable[T](
+    val embeddingTable = context.layer.getParameter[T](
       name = wordEmbeddingsTableName,
       shape = Shape(vocabularySize, embeddingSize),
       initializer = BERT.createInitializer(initializerRange))
@@ -142,9 +188,10 @@ object Helpers {
       }
     }
 
-    val inputShape = tf.shape(result)
+    val inputShape = tf.shape(reshapedInputIDs)
     val resultShape = tf.concatenate(Seq(inputShape(0 :: -1), inputShape(-1, NewAxis) * embeddingSize))
     val reshapedResult = tf.reshape(result, resultShape)
+    reshapedResult.setShape(reshapedInputIDs.shape(0 :: -1) ++ Shape(reshapedInputIDs.shape(-1) * embeddingSize))
 
     (reshapedResult, embeddingTable)
   }
@@ -176,7 +223,7 @@ object Helpers {
       initializerRange: Float,
       maxPositionEmbeddings: Int,
       dropoutProbability: Float
-  ): Output[T] = {
+  )(implicit context: Context): Output[T] = {
     val inputShape = tf.shape(input)
     val batchSize = if (input.shape(0) > -1) tf.constant(input.shape(0)) else inputShape(0)
     val sequenceLength = if (input.shape(1) > -1) tf.constant(input.shape(1)) else inputShape(1)
@@ -188,7 +235,7 @@ object Helpers {
     tokenTypeIDs match {
       case None => ()
       case Some(ids) =>
-        val tokenTypeEmbeddingsTable = tf.variable[T](
+        val tokenTypeEmbeddingsTable = context.layer.getParameter[T](
           name = tokenTypeEmbeddingsTableName,
           shape = Shape(tokenTypeVocabularySize, width),
           initializer = BERT.createInitializer(initializerRange))
@@ -196,13 +243,13 @@ object Helpers {
         // for small vocabularies.
         val flatTokenTypeIDs = tf.reshape(ids, Shape(-1))
         val oneHotIDs = tf.oneHot(flatTokenTypeIDs, depth = tokenTypeVocabularySize)
-        val tokenTypeEmbeddings = tf.matmul(oneHotIDs, tokenTypeEmbeddingsTable.value)
+        val tokenTypeEmbeddings = tf.matmul(oneHotIDs, tokenTypeEmbeddingsTable)
         result += tf.reshape(tokenTypeEmbeddings, tf.stack(Seq(batchSize, sequenceLength, tf.constant(width))))
     }
 
     if (usePositionEmbeddings) {
       tf.createWith(controlDependencies = Set(tf.assertLessEqual(sequenceLength, maxPositionEmbeddings))) {
-        val fullPositionEmbeddings = tf.variable[T](
+        val fullPositionEmbeddings = context.layer.getParameter[T](
           name = positionEmbeddingsTableName,
           shape = Shape(maxPositionEmbeddings, width),
           initializer = BERT.createInitializer(initializerRange))
@@ -215,7 +262,6 @@ object Helpers {
           fullPositionEmbeddings,
           begin = Seq(0, 0),
           size = tf.stack(Seq(sequenceLength, tf.constant(-1))))
-        val rank = result.rank
 
         // Only the last two dimensions are relevant (`sequenceLength` and `width`), and so we broadcast among the
         // first dimensions, which is typically just the batch size.
@@ -273,29 +319,29 @@ object Helpers {
     * In practice, the multi-headed attention is done with transpose and reshape operations, rather than with separate
     * tensors.
     *
-    * @param  fromTensor                  Tensor with shape `[batchSize, fromSequenceLength, fromWidth]`.
-    * @param  toTensor                    Tensor with shape `[batchSize, toSequenceLength, toWidth]`.
-    * @param  attentionMask               Tensor with shape [batchSize, fromSequenceLength, toSequenceLength]`. The
-    *                                     values should be `1` or `0`. The attention scores will effectively be set to
-    *                                     negative infinity for any positions in the mask that are `0`, and will be
-    *                                     unchanged for positions that are `1`.
-    * @param  numHeads                    Number of attention heads.
-    * @param  sizePerHead                 Size of each attention head.
-    * @param  queryActivation             Activation function for the attention queries.
-    * @param  keyActivation               Activation function for the attention keys.
-    * @param  valueActivation             Activation function for the attention values.
-    * @param  attentionDropoutProbability Dropout probability for the attention scores.
-    * @param  initializerRange            Embeddings table initializer standard deviation.
-    * @param  returnMatrix                If true`, the output will be of shape
-    *                                     `[batchSize * fromSequenceLength, numHeads * sizePerHead]`. If `false`, the
-    *                                     output will be of shape
-    *                                     `[batchSize, fromSequenceLength, numHeads * sizePerHead]`.
-    * @param  batchSize                   If the input is 2D, then this might be the batch size of the 3D version
-    *                                     of the `fromTensor` and `toTensor`.
-    * @param  fromSequenceLength          If the input is 2D, then this might be the sequence length of the 3D version
-    *                                     of the `fromTensor`.
-    * @param  toSequenceLength            If the input is 2D, then this might be the sequence length of the 3D version
-    *                                     of the `toTensor`.
+    * @param  fromTensor         Tensor with shape `[batchSize, fromSequenceLength, fromWidth]`.
+    * @param  toTensor           Tensor with shape `[batchSize, toSequenceLength, toWidth]`.
+    * @param  attentionMask      Tensor with shape [batchSize, fromSequenceLength, toSequenceLength]`. The
+    *                            values should be `1` or `0`. The attention scores will effectively be set to
+    *                            negative infinity for any positions in the mask that are `0`, and will be
+    *                            unchanged for positions that are `1`.
+    *                            @param  numHeads                    Number of attention heads.
+    *                            @param  sizePerHead                 Size of each attention head.
+    *                            @param  queryActivation             Activation function for the attention queries.
+    *                            @param  keyActivation               Activation function for the attention keys.
+    *                            @param  valueActivation             Activation function for the attention values.
+    *                            @param  attentionDropoutProbability Dropout probability for the attention scores.
+    *                            @param  initializerRange            Embeddings table initializer standard deviation.
+    *                            @param  returnMatrix                If true`, the output will be of shape
+    *                            `[batchSize * fromSequenceLength, numHeads * sizePerHead]`. If `false`, the
+    *                            output will be of shape
+    *                            `[batchSize, fromSequenceLength, numHeads * sizePerHead]`.
+    * @param  batchSize          If the input is 2D, then this might be the batch size of the 3D version
+    *                            of the `fromTensor` and `toTensor`.
+    * @param  fromSequenceLength If the input is 2D, then this might be the sequence length of the 3D version
+    *                            of the `fromTensor`.
+    * @param  toSequenceLength   If the input is 2D, then this might be the sequence length of the 3D version
+    *                            of the `toTensor`.
     * @return Tensor with shape `[batchSize, fromSequenceLength, numHeads * sizePerHead]`. If `returnMatrix` is `true`,
     *         this will be of shape `[batchSize * fromSequenceLength, numHeads * sizePerHead]`).
     * @throws IllegalArgumentException If the shapes of `fromTensor` and `toTensor` are invalid.
@@ -316,7 +362,7 @@ object Helpers {
       batchSize: Option[Output[Int]] = None,
       fromSequenceLength: Option[Output[Int]] = None,
       toSequenceLength: Option[Output[Int]] = None
-  ): Output[T] = {
+  )(implicit context: Context): Output[T] = {
     if (fromTensor.rank != toTensor.rank)
       throw new IllegalArgumentException("The rank of 'fromTensor' must match that of 'toTensor'.")
 
@@ -342,33 +388,33 @@ object Helpers {
     val toTensor2D = reshapeToMatrix(toTensor)
 
     // Query = [B*F, N*H]
-    val queryWeights = tf.variable[T](
+    val queryWeights = context.layer.getParameter[T](
       name = "Query/Weights",
       shape = Shape(fromTensor2D.shape(-1), numHeads * sizePerHead),
       initializer = BERT.createInitializer(initializerRange))
-    val queryBias = tf.variable[T](
+    val queryBias = context.layer.getParameter[T](
       name = "Query/Bias",
       shape = Shape(numHeads * sizePerHead),
       initializer = tf.ZerosInitializer)
     val query = queryActivation(tf.linear(fromTensor2D, queryWeights, queryBias))
 
     // Key = [B*T, N*H]
-    val keyWeights = tf.variable[T](
+    val keyWeights = context.layer.getParameter[T](
       name = "Key/Weights",
       shape = Shape(toTensor2D.shape(-1), numHeads * sizePerHead),
       initializer = BERT.createInitializer(initializerRange))
-    val keyBias = tf.variable[T](
+    val keyBias = context.layer.getParameter[T](
       name = "Key/Bias",
       shape = Shape(numHeads * sizePerHead),
       initializer = tf.ZerosInitializer)
     val key = keyActivation(tf.linear(toTensor2D, keyWeights, keyBias))
 
     // Value = [B*T, N*H]
-    val valueWeights = tf.variable[T](
+    val valueWeights = context.layer.getParameter[T](
       name = "Value/Weights",
       shape = Shape(toTensor2D.shape(-1), numHeads * sizePerHead),
       initializer = BERT.createInitializer(initializerRange))
-    val valueBias = tf.variable[T](
+    val valueBias = context.layer.getParameter[T](
       name = "Value/Bias",
       shape = Shape(numHeads * sizePerHead),
       initializer = tf.ZerosInitializer)
@@ -381,7 +427,7 @@ object Helpers {
         sequenceLength: Output[Int],
         width: Output[Int]
     ): Output[T] = {
-      val reshaped = tf.reshape(input, tf.stack(Seq(batchSize, numHeads, sequenceLength, width)))
+      val reshaped = tf.reshape(input, tf.stack(Seq(batchSize, sequenceLength, numHeads, width)))
       tf.transpose(reshaped, Tensor(0, 2, 1, 3))
     }
 
@@ -418,23 +464,23 @@ object Helpers {
     attentionProbabilities = dropout(attentionProbabilities, attentionDropoutProbability)
 
     // Transposed Value = [B, N, T, H]
-    val transposedValue = transposeForScores(value, B, T, N, H)
+    val transposedValue = transposeForScores(value, B, N, T, H)
 
-    // Context = [B, N, F, H]
-    var context = tf.matmul(attentionProbabilities, transposedValue)
+    // Output = [B, N, F, H]
+    var output = tf.matmul(attentionProbabilities, transposedValue)
 
-    // Context = [B, F, N, H]
-    context = tf.transpose(context, Tensor(0, 2, 1, 3))
+    // Output = [B, F, N, H]
+    output = tf.transpose(output, Tensor(0, 2, 1, 3))
 
     if (returnMatrix) {
-      // Context = [B*F, N*H]
-      context = tf.reshape(context, tf.stack(Seq(B * F, N * H)))
+      // Output = [B*F, N*H]
+      output = tf.reshape(output, tf.stack(Seq(B * F, N * H)))
     } else {
-      // Context = [B, F, N*H]
-      context = tf.reshape(context, tf.stack(Seq(B, F, N * H)))
+      // Output = [B, F, N*H]
+      output = tf.reshape(output, tf.stack(Seq(B, F, N * H)))
     }
 
-    context
+    output
   }
 
   /** Creates a multi-headed, multi-layer Transformer from "Attention is All You Need".
@@ -473,7 +519,7 @@ object Helpers {
       hiddenDropoutProbability: Float,
       attentionDropoutProbability: Float,
       initializerRange: Float
-  ): Seq[Output[T]] = {
+  )(implicit context: Context): Seq[Output[T]] = {
     if (hiddenSize % numAttentionHeads != 0) {
       throw new IllegalArgumentException(
         s"The hidden size ($hiddenSize) is not a multiple of the number of attention heads ($numAttentionHeads).")
@@ -498,43 +544,47 @@ object Helpers {
     val allLayerOutputs = Array.ofDim[Output[T]](numHiddenLayers)
     for (layerIndex <- 0 until numHiddenLayers) {
       tf.variableScope(s"Layer$layerIndex") {
-        var attentionOutput = tf.variableScope("Self") {
-          multiHeadAttention(
-            fromTensor = previousOutput,
-            toTensor = previousOutput,
-            attentionMask = attentionMask,
-            numHeads = numAttentionHeads,
-            sizePerHead = attentionHeadSize,
-            attentionDropoutProbability = attentionDropoutProbability,
-            initializerRange = initializerRange,
-            returnMatrix = true,
-            batchSize = Some(batchSize),
-            fromSequenceLength = Some(sequenceLength),
-            toSequenceLength = Some(sequenceLength))
-        }
+        val attentionOutput = tf.variableScope("Attention") {
+          var attentionOutput = tf.variableScope("Self") {
+            multiHeadAttention(
+              fromTensor = previousOutput,
+              toTensor = previousOutput,
+              attentionMask = attentionMask,
+              numHeads = numAttentionHeads,
+              sizePerHead = attentionHeadSize,
+              attentionDropoutProbability = attentionDropoutProbability,
+              initializerRange = initializerRange,
+              returnMatrix = true,
+              batchSize = Some(batchSize),
+              fromSequenceLength = Some(sequenceLength),
+              toSequenceLength = Some(sequenceLength))
+          }
 
-        // Run a linear projection of `hiddenSize` and then add a residual connection to `previousOutput`.
-        tf.variableScope("Output") {
-          val weights = tf.variable[T](
-            name = "Weights",
-            shape = Shape(attentionOutput.shape(-1), hiddenSize),
-            initializer = BERT.createInitializer(initializerRange))
-          val bias = tf.variable[T](
-            name = "Bias",
-            shape = Shape(hiddenSize),
-            initializer = tf.ZerosInitializer)
-          attentionOutput = tf.linear(attentionOutput, weights, bias)
-          attentionOutput = dropout(attentionOutput, hiddenDropoutProbability)
-          attentionOutput = layerNormalization(attentionOutput + previousOutput)
+          // Run a linear projection of `hiddenSize` and then add a residual connection to `previousOutput`.
+          tf.variableScope("Output") {
+            val weights = context.layer.getParameter[T](
+              name = "Weights",
+              shape = Shape(attentionOutput.shape(-1), hiddenSize),
+              initializer = BERT.createInitializer(initializerRange))
+            val bias = context.layer.getParameter[T](
+              name = "Bias",
+              shape = Shape(hiddenSize),
+              initializer = tf.ZerosInitializer)
+            attentionOutput = tf.linear(attentionOutput, weights, bias)
+            attentionOutput = dropout(attentionOutput, hiddenDropoutProbability)
+            attentionOutput = layerNormalization(attentionOutput + previousOutput)
+          }
+
+          attentionOutput
         }
 
         // The activation is only applied to the "intermediate" hidden layer.
         val intermediateOutput = tf.variableScope("Intermediate") {
-          val weights = tf.variable[T](
+          val weights = context.layer.getParameter[T](
             name = "Weights",
             shape = Shape(attentionOutput.shape(-1), intermediateSize),
             initializer = BERT.createInitializer(initializerRange))
-          val bias = tf.variable[T](
+          val bias = context.layer.getParameter[T](
             name = "Bias",
             shape = Shape(intermediateSize),
             initializer = tf.ZerosInitializer)
@@ -544,11 +594,11 @@ object Helpers {
 
         // Down-project back to `hiddenSize` and add the residual.
         tf.variableScope("Output") {
-          val weights = tf.variable[T](
+          val weights = context.layer.getParameter[T](
             name = "Weights",
             shape = Shape(intermediateOutput.shape(-1), hiddenSize),
             initializer = BERT.createInitializer(initializerRange))
-          val bias = tf.variable[T](
+          val bias = context.layer.getParameter[T](
             name = "Bias",
             shape = Shape(hiddenSize),
             initializer = tf.ZerosInitializer)
@@ -561,6 +611,10 @@ object Helpers {
       }
     }
 
-    allLayerOutputs.map(output => reshapeFromMatrix(output, input.shape))
+    allLayerOutputs.map(output => {
+      val reshaped = reshapeFromMatrix(output, tf.shape(input))
+      reshaped.setShape(input.shape(0 :: -1) ++ Shape(output.shape(-1)))
+      reshaped
+    })
   }
 }

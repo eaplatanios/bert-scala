@@ -13,11 +13,11 @@
  * the License.
  */
 
-package org.platanios.bert.models
+package org.platanios.bert.models.layers
 
+import org.platanios.bert.models._
 import org.platanios.tensorflow.api._
 import org.platanios.tensorflow.api.learn.Mode
-import org.platanios.tensorflow.api.io.CheckpointReader
 
 import better.files._
 import _root_.io.circe._
@@ -42,6 +42,8 @@ class BERT[T: TF : IsHalfOrFloatOrDouble](
 ) extends tf.learn.Layer[BERT.In, BERT.Out[T]](name) {
   override val layerType: String = "BERT"
 
+  protected implicit val context: Context = Context(this)
+
   override def forwardWithoutContext(input: BERT.In)(implicit mode: Mode): BERT.Out[T] = {
     tf.variableScope("BERT") {
       val (embeddingsOutput, embeddingsTable) = tf.variableScope("Embeddings") {
@@ -64,7 +66,7 @@ class BERT[T: TF : IsHalfOrFloatOrDouble](
           positionEmbeddingsTableName = "PositionEmbeddings",
           initializerRange = config.initializerRange,
           maxPositionEmbeddings = config.maxPositionEmbeddings,
-          dropoutProbability = config.hiddenDropoutProbability)
+          dropoutProbability = if (mode.isTraining) config.hiddenDropoutProbability else 0.0f)
         (postProcessedEmbeddingsOutput, embeddingsTable)
       }
 
@@ -83,32 +85,32 @@ class BERT[T: TF : IsHalfOrFloatOrDouble](
           numAttentionHeads = config.numAttentionHeads,
           intermediateSize = config.intermediateSize,
           intermediateActivation = config.activation,
-          hiddenDropoutProbability = config.hiddenDropoutProbability,
-          attentionDropoutProbability = config.attentionDropoutProbability,
+          hiddenDropoutProbability = if (mode.isTraining) config.hiddenDropoutProbability else 0.0f,
+          attentionDropoutProbability = if (mode.isTraining) config.attentionDropoutProbability else 0.0f,
           initializerRange = config.initializerRange)
       }
+//
+//      val sequenceOutput = encoderLayers.last
+//
+//      // The "pooler" converts the encoded sequence tensor of shape [batchSize, sequenceLength, hiddenSize] to a tensor
+//      // of shape [batchSize, hiddenSize]. This is necessary for segment-level (or segment-pair-level) classification
+//      // tasks where we need a fixed dimensional representation of the segment.
+//      val pooledOutput = tf.variableScope("Pooler") {
+//        // We "pool" the model by simply taking the hidden state corresponding to the first token. We assume that this
+//        // has been pre-trained.
+//        val firstTokenTensor = sequenceOutput(::, 0, ::)
+//        val weights = getParameter[T](
+//          name = "Weights",
+//          shape = Shape(firstTokenTensor.shape(-1), config.hiddenSize),
+//          initializer = BERT.createInitializer(config.initializerRange))
+//        val bias = getParameter[T](
+//          name = "Bias",
+//          shape = Shape(config.hiddenSize),
+//          initializer = tf.ZerosInitializer)
+//        Tanh(tf.linear(firstTokenTensor, weights, bias))
+//      }
 
-      val sequenceOutput = encoderLayers.last
-
-      // The "pooler" converts the encoded sequence tensor of shape [batchSize, sequenceLength, hiddenSize] to a tensor
-      // of shape [batchSize, hiddenSize]. This is necessary for segment-level (or segment-pair-level) classification
-      // tasks where we need a fixed dimensional representation of the segment.
-      val pooledOutput = tf.variableScope("Pooler") {
-        // We "pool" the model by simply taking the hidden state corresponding to the first token. We assume that this
-        // has been pre-trained.
-        val firstTokenTensor = sequenceOutput(::, 0, ::)
-        val weights = tf.variable[T](
-          name = "Weights",
-          shape = Shape(firstTokenTensor.shape(-1), config.hiddenSize),
-          initializer = BERT.createInitializer(config.initializerRange))
-        val bias = tf.variable[T](
-          name = "Bias",
-          shape = Shape(config.hiddenSize),
-          initializer = tf.ZerosInitializer)
-        Tanh(tf.linear(firstTokenTensor, weights, bias))
-      }
-
-      BERT.Out(sequenceOutput, pooledOutput, embeddingsOutput, encoderLayers, embeddingsTable)
+      BERT.Out(embeddingsOutput, encoderLayers, embeddingsTable)
     }
   }
 }
@@ -117,11 +119,9 @@ object BERT {
   case class In(inputIDs: Output[Int], inputMask: Output[Int], tokenTypeIDs: Output[Int])
 
   case class Out[T: TF : IsHalfOrFloatOrDouble](
-      sequenceOutput: Output[T],
-      pooledOutput: Output[T],
       embeddingsOutput: Output[T],
       encoderLayers: Seq[Output[T]],
-      embeddingsTable: Variable[T])
+      embeddingsTable: Output[T])
 
   /** JSON configuration used for serializing configurations. */
   private implicit val jsonConfig: Configuration = Configuration.default
@@ -188,15 +188,5 @@ object BERT {
 
   private[models] def createInitializer(range: Float = 0.02f): tf.VariableInitializer = {
     tf.RandomTruncatedNormalInitializer(standardDeviation = range)
-  }
-
-  def main(args: Array[String]): Unit = {
-    val configFile = File("temp") / "models" / "uncased_L-12_H-768_A-12" / "bert_config.json"
-    val ckptFile = File("temp") / "models" / "uncased_L-12_H-768_A-12" / "bert_model.ckpt"
-    val config = Config.fromFile(configFile)
-    val checkpointReader = CheckpointReader(ckptFile.path)
-    val variables = checkpointReader.variableShapes
-    variables.foreach(v => println(v._1))
-    println("haha Christoph")
   }
 }

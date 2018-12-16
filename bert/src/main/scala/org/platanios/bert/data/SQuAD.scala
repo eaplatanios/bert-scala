@@ -16,12 +16,16 @@
 package org.platanios.bert.data
 
 import org.platanios.bert.data.tokenization._
+import org.platanios.bert.models.layers.BERT
+import org.platanios.bert.models.tasks.QuestionAnsweringBERT
+import org.platanios.tensorflow.api._
 import org.platanios.tensorflow.api.io.TFRecordWriter
+import org.platanios.tensorflow.api.ops.Parsing.FixedLengthFeature
 
 import better.files._
 import com.typesafe.scalalogging.Logger
-import io.circe.generic.auto._
-import io.circe.parser._
+import _root_.io.circe.generic.auto._
+import _root_.io.circe.parser._
 import org.slf4j.LoggerFactory
 import org.tensorflow.example._
 
@@ -104,12 +108,12 @@ object SQuAD {
               var originalAnswer: Option[String] = None
               var answerSpan: Option[Span] = None
               var skipQuestion: Boolean = false
-              if (isTraining) {
-                if (!isImpossible && qa.answers.length != 1)
+              if (isTraining && !isImpossible) {
+                if (qa.answers.length != 1)
                   throw new IllegalArgumentException("For training, each question should have exactly 1 answer.")
                 val answer = qa.answers.head
                 val answerOffset = answer.answer_start
-                val answerLength = originalAnswer.get.length
+                val answerLength = answer.text.length
                 val startPosition = charToWordOffset(answerOffset)
                 val endPosition = charToWordOffset(answerOffset + answerLength - 1)
                 originalAnswer = Some(answer.text)
@@ -154,8 +158,13 @@ object SQuAD {
       maxQueryLength: Int = 64,
       logFirstN: Int = 20
   ): Iterator[Features] = {
+    logger.info("Converting examples to features.")
+
+    var progress = 0L
+    var progressLogTime = System.currentTimeMillis
+
     var uniqueID = 1000000000L
-    examples.toIterator.zipWithIndex.flatMap {
+    val features = examples.toIterator.zipWithIndex.flatMap {
       case (example, exampleIndex) =>
         val queryTokens = tokenizer.tokenize(example.question).take(maxQueryLength)
 
@@ -201,7 +210,7 @@ object SQuAD {
           startOffset += math.min(length, documentStride)
         }
 
-        documentSpans.zipWithIndex.map {
+        val features = documentSpans.zipWithIndex.map {
           case (documentSpan, documentSpanIndex) =>
             var tokens = Seq.empty[String]
             var tokenToOriginalMap = Map.empty[Int, Int]
@@ -223,6 +232,7 @@ object SQuAD {
               val splitTokenIndex = documentSpan.start + i
               tokenToOriginalMap += tokens.length -> tokenToOriginalIndex(splitTokenIndex)
               tokenIsMaxContext += tokens.length -> isMaxContext(documentSpans, documentSpanIndex, splitTokenIndex)
+              tokens :+= allDocumentTokens(splitTokenIndex)
               segmentIDs :+= 1L
             }
             tokens :+= "[SEP]"
@@ -276,7 +286,7 @@ object SQuAD {
               if (isTraining && example.isImpossible)
                 logger.info("\t Impossible Example")
               if (isTraining && !example.isImpossible) {
-                val answer = tokens.slice(answerSpan.get.start, answerSpan.get.end - answerSpan.get.start).mkString(" ")
+                val answer = tokens.slice(answerSpan.get.start, answerSpan.get.end + 1).mkString(" ")
                 logger.info(s"\t Answer Start:         ${answerSpan.get.start}")
                 logger.info(s"\t Answer End:           ${answerSpan.get.end}")
                 logger.info(s"\t Answer:               $answer")
@@ -290,7 +300,23 @@ object SQuAD {
             uniqueID += 1
             features
         }
+
+        progress += 1L
+        val time = System.currentTimeMillis
+        if (time - progressLogTime >= 1e4) {
+          val numBars = Math.floorDiv(progress, examples.length).toInt
+          logger.info(
+            s"│${"═" * numBars}${" " * (10 - numBars)}│ " +
+                s"%${features.length.toString.length}s / ${examples.length} examples converted.".format(progress))
+          progressLogTime = time
+        }
+
+        features
     }
+
+    logger.info("Converted examples to features.")
+
+    features
   }
 
   /** Writes the provided features as TensorFlow records in the provided file.
@@ -327,7 +353,7 @@ object SQuAD {
         features.putFeature("is_impossible", intFeature(Seq(if (feature.isImpossible) 1L else 0L)))
       }
 
-      org.tensorflow.example.Example.newBuilder().setFeatures(features).build()
+      writer.write(org.tensorflow.example.Example.newBuilder().setFeatures(features).build())
       numFeaturesWritten += 1
     })
     writer.flush()
@@ -429,6 +455,56 @@ object SQuAD {
     currentSpanIndex == bestSpanIndex
   }
 
+  def createTrainDataset(
+      file: File,
+      batchSize: Int,
+      numParallelCalls: Int
+  ): tf.data.Dataset[(QuestionAnsweringBERT.In, QuestionAnsweringBERT.TrainIn)] = {
+    tf.data.datasetFromTFRecordFiles(file.path.toAbsolutePath.toString)
+        .repeat()
+        .shuffle(100)
+        .mapAndBatch(
+          function = record => {
+            val parsed = parseTrainTFRecord(record)
+            (parsed._1, (parsed._2._1, parsed._2._2))
+          },
+          batchSize = batchSize,
+          numParallelCalls = numParallelCalls,
+          dropRemainder = false)
+  }
+
+  protected def parseTrainTFRecord(
+      serialized: Output[String]
+  ): ((Output[Long], Output[Int], Output[Int], Output[Int]), (Output[Int], Output[Int], Output[Int])) = {
+    val example = tf.parseSingleExample(
+      serialized = serialized,
+      features = (
+          FixedLengthFeature[Long](key = "unique_ids", shape = Shape()),
+          FixedLengthFeature[Long](key = "input_ids", shape = Shape(-1)),
+          FixedLengthFeature[Long](key = "input_mask", shape = Shape(-1)),
+          FixedLengthFeature[Long](key = "segment_ids", shape = Shape(-1)),
+          FixedLengthFeature[Long](key = "start_positions", shape = Shape()),
+          FixedLengthFeature[Long](key = "end_positions", shape = Shape()),
+          FixedLengthFeature[Long](key = "is_impossible", shape = Shape())),
+      name = "ParsedTrainExample")
+    ((example._1, example._2.toInt, example._3.toInt, example._4.toInt),
+        (example._5.toInt, example._6.toInt, example._7.toInt))
+  }
+
+  protected def parseInferTFRecord(
+      serialized: Output[String]
+  ): (Output[Long], Output[Int], Output[Int], Output[Int]) = {
+    val example = tf.parseSingleExample(
+      serialized = serialized,
+      features = (
+          FixedLengthFeature[Long](key = "unique_ids", shape = Shape()),
+          FixedLengthFeature[Long](key = "input_ids", shape = Shape(-1)),
+          FixedLengthFeature[Long](key = "input_mask", shape = Shape(-1)),
+          FixedLengthFeature[Long](key = "segment_ids", shape = Shape(-1))),
+      name = "ParsedInferExample")
+    (example._1, example._2.toInt, example._3.toInt, example._4.toInt)
+  }
+
   private val whitespaceRegex: Regex = "\\s+".r
 
   private def isWhitespace(c: Char): Boolean = {
@@ -472,13 +548,40 @@ object SQuAD {
     // BERT-Base, Chinese: https://storage.googleapis.com/bert_models/2018_11_03/chinese_L-12_H-768_A-12.zip
     //   Chinese Simplified and Traditional, 12-layer, 768-hidden, 12-heads, 110M parameters
 
+    val trainFile = "temp" / "data" / "squad" / "train-v2.0.json"
     val devFile = "temp" / "data" / "squad" / "dev-v2.0.json"
+    val trainTFRecordsFile = "temp" / "data" / "squad" / "train.tfrecords"
+    val devTFRecordsFile = "temp" / "data" / "squad" / "dev.tfrecords"
+
     val vocabFile = "temp" / "models" / "uncased_L-12_H-768_A-12" / "vocab.txt"
+    val bertConfigFile = "temp" / "models" / "uncased_L-12_H-768_A-12" / "bert_config.json"
+    val bertCkptFile = "temp" / "models" / "uncased_L-12_H-768_A-12" / "bert_model.ckpt"
+
     val vocabulary = Vocabulary.fromFile(vocabFile)
     val tokenizer = new FullTokenizer(vocabulary, caseSensitive = false, unknownToken = "[UNK]", maxWordLength = 200)
-    val examples = readExamples(isTraining = false, devFile)
-    val features = convertToFeatures(isTraining = false, examples, tokenizer)
-    features.toArray
+
+    if (trainTFRecordsFile.notExists) {
+      writeFeatures(
+        isTraining = true,
+        features = convertToFeatures(isTraining = true, readExamples(isTraining = true, trainFile), tokenizer),
+        file = trainTFRecordsFile)
+    }
+
+    if (devTFRecordsFile.notExists) {
+      writeFeatures(
+        isTraining = false,
+        features = convertToFeatures(isTraining = false, readExamples(isTraining = false, devFile), tokenizer),
+        devTFRecordsFile)
+    }
+
+    val trainDataset = () => createTrainDataset(trainTFRecordsFile, batchSize = 32, numParallelCalls = 4)
+    val config = QuestionAnsweringBERT.Config(
+      bertConfig = BERT.Config.fromFile(bertConfigFile),
+      bertCheckpoint = Some(bertCkptFile.path),
+      workingDir = ("temp" / "working-dirs" / "uncased_L-12_H-768_A-12").path,
+      summaryDir = ("temp" / "summaries" / "uncased_L-12_H-768_A-12").path)
+    val model = new QuestionAnsweringBERT[Float](config)
+    model.train(trainDataset)
     println("haha")
   }
 }
