@@ -242,16 +242,16 @@ class QuestionAnsweringBERT[T: TF : IsHalfOrFloatOrDouble](
         val mappedName = mapName(if (variableScope != null && variableScope != "") s"$variableScope/$name" else name)
         (config.bertCheckpoint, variables.get(mappedName)) match {
           case (Some(path), Some(dataType)) =>
-            tf.createWith(device = "/CPU:0", controlDependencies = Set.empty) {
-              val value = Op.Builder[(Output[String], Output[String], Output[String]), Seq[Output[P]]](
+            val value = tf.createWith(device = "/CPU:0", controlDependencies = Set.empty) {
+              Op.Builder[(Output[String], Output[String], Output[String]), Seq[Output[P]]](
                 opType = "RestoreV2",
                 name = name,
                 input = (path.toAbsolutePath.toString, Tensor[String](mappedName), Tensor[String](""))
               ).setAttribute("dtypes", Array(dataType))
                   .build().output.head
-              tf.variable[P](
-                name, shape, tf.ConstantInitializer(value), regularizer, trainable, reuse, collections, cachingDevice)
             }
+            tf.variable[P](
+              name, shape, tf.ConstantInitializer(value), regularizer, trainable, reuse, collections, cachingDevice)
           case _ =>
             tf.variable[P](
               name, shape, initializer, regularizer, trainable, reuse, collections, cachingDevice)
