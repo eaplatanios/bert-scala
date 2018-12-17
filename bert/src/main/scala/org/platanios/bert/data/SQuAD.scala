@@ -329,10 +329,32 @@ object SQuAD {
   def writeFeatures(
       isTraining: Boolean,
       features: Iterator[Features],
-      file: File
+      file: File,
+      randomSeed: Option[Long] = None
   ): Int = {
     var numFeaturesWritten = 0
     val writer = TFRecordWriter(file.path)
+
+    // If training, shuffle the features so that we can use a small shuffle buffer size when feeding data to the model.
+    val shuffledFeatures = {
+      if (!isTraining) {
+        features.toArray
+      } else {
+        def fisherYatesShuffle[T](values: Array[T]): Array[T] = {
+          val random = randomSeed.map(new scala.util.Random(_)).getOrElse(new scala.util.Random())
+          values.indices.foreach(n => {
+            val randomIndex = n + random.nextInt(values.length - n)
+            val temp = values(randomIndex)
+            values.update(randomIndex, values(n))
+            values(n) = temp
+          })
+          values
+        }
+
+        val featuresArray = features.toArray
+        fisherYatesShuffle(featuresArray)
+      }
+    }
 
     def intFeature(values: Seq[Long]): Feature = {
       Feature.newBuilder()
@@ -340,7 +362,7 @@ object SQuAD {
           .build()
     }
 
-    features.foreach(feature => {
+    shuffledFeatures.foreach(feature => {
       val features = org.tensorflow.example.Features.newBuilder()
       features.putFeature("unique_ids", intFeature(Seq(feature.uniqueID)))
       features.putFeature("input_ids", intFeature(feature.inputIDs))
@@ -566,14 +588,16 @@ object SQuAD {
       writeFeatures(
         isTraining = true,
         features = convertToFeatures(isTraining = true, readExamples(isTraining = true, trainFile), tokenizer),
-        file = trainTFRecordsFile)
+        file = trainTFRecordsFile,
+        randomSeed = Some(12345L))
     }
 
     if (devTFRecordsFile.notExists) {
       writeFeatures(
         isTraining = false,
         features = convertToFeatures(isTraining = false, readExamples(isTraining = false, devFile), tokenizer),
-        devTFRecordsFile)
+        file = devTFRecordsFile,
+        randomSeed = Some(12345L))
     }
 
     val trainDataset = () => createTrainDataset(trainTFRecordsFile, batchSize = 12, numParallelCalls = 4)
@@ -581,8 +605,7 @@ object SQuAD {
       bertConfig = BERT.Config.fromFile(bertConfigFile),
       bertCheckpoint = Some(bertCkptFile.path),
       workingDir = ("temp" / "working-dirs" / "uncased_L-12_H-768_A-12").path,
-      summaryDir = ("temp" / "summaries" / "uncased_L-12_H-768_A-12").path,
-      traceSteps = Some(100))
+      summaryDir = ("temp" / "summaries" / "uncased_L-12_H-768_A-12").path)
     val model = new QuestionAnsweringBERT[Float](config)
     model.train(trainDataset)
     println("haha")

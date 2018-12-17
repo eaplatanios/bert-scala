@@ -286,7 +286,7 @@ object QuestionAnsweringBERT {
       inferBatchSize: Int = 8,
       learningRate: Float = 3e-5f,
       maxGradNorm: Option[Float] = Some(1.0f),
-      colocateGradientsWithOps: Boolean = true,
+      colocateGradientsWithOps: Boolean = false,
       checkpointSteps: Int = 1000,
       summarySteps: Int = 100,
       traceSteps: Option[Int] = None,

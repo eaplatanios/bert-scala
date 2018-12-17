@@ -90,59 +90,13 @@ object Helpers {
       // Calculate the moments on the last axis (layer activations).
       val mean = tf.mean(value, axes = -1, keepDims = true)
       val variance = tf.mean(tf.square(value - mean), axes = -1, keepDims = true)
-      // val mean = tf.mean(value, axes = Seq(-1), keepDims = true, name = "Mean")
-      // val variance = tf.mean(
-      //   tf.squaredDifference(value, tf.stopGradient(mean)), axes = Seq(-1), keepDims = true, name = "Variance")
 
       // Compute layer normalization using the batch normalization function.
       val epsilon = tf.constant(1e-12f)
       val normalizedInput = (value - mean) * tf.rsqrt(variance + epsilon.castTo[T])
       val result = normalizedInput * gamma + beta
-      // val result = batchNormalization(value, mean, variance, Some(beta), Some(gamma), tf.constant(1e-12).castTo[T])
       result.setShape(value.shape)
       result
-    }
-  }
-
-  /** The `batchNormalization` op applies batch normalization to input `x`, as described in
-    * [[http://arxiv.org/abs/1502.03167]].
-    *
-    * The op normalizes a tensor by `mean` and `variance`, and optionally applies a `scale` and `offset` to it
-    * `beta + scale * (x - mean) / variance`. `mean`, `variance`, `offset` and `scale` are all expected to be of one
-    * of two shapes:
-    *
-    *   - In all generality, they can have the same number of dimensions as the input `x`, with identical sizes as `x`
-    *     for the dimensions that are not normalized over the "depth" dimension(s), and size 1 for the others, which
-    *     are being normalized over. `mean` and `variance` in this case would typically be the outputs of
-    *     `tf.moments(..., keepDims = true)` during training, or running averages thereof during inference.
-    *   - In the common case where the "depth" dimension is the last dimension in the input tensor `x`, they may be
-    *     one-dimensional tensors of the same size as the "depth" dimension. This is the case, for example, for the
-    *     common `[batch, depth]` layout of fully-connected layers, and `[batch, height, width, depth]` for
-    *     convolutions. `mean` and `variance` in this case would typically be the outputs of
-    *     `tf.moments(..., keepDims = false)` during training, or running averages thereof during inference.
-    *
-    * @param  x        Input tensor of arbitrary dimensionality.
-    * @param  mean     Mean tensor.
-    * @param  variance Variance tensor.
-    * @param  offset   Optional offset tensor, often denoted `beta` in equations.
-    * @param  scale    Optional scale tensor, often denoted `gamma` in equations.
-    * @param  epsilon  Small floating point number added to the variance to avoid division by zero.
-    * @param  name     Name for the created ops.
-    * @return Batch-normalized tensor `x`.
-    */
-  def batchNormalization[T: TF : IsDecimal](
-      x: Output[T],
-      mean: Output[T],
-      variance: Output[T],
-      offset: Option[Output[T]] = None,
-      scale: Option[Output[T]] = None,
-      epsilon: Output[T],
-      name: String = "BatchNormalization"
-  ): Output[T] = {
-    tf.nameScope(name) {
-      val inv = tf.rsqrt(variance + epsilon)
-      val scaledInv = scale.map(inv * _).getOrElse(inv)
-      x * scaledInv + offset.map(_ - mean * scaledInv).getOrElse(-mean * scaledInv)
     }
   }
 
